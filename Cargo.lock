@@ -485,6 +485,7 @@ dependencies = [
  "base64",
  "cadmpeg-core",
  "cadmpeg-test-support",
+ "foldhash",
  "libm",
  "proc-macro2",
  "proptest",

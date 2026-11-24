@@ -2,8 +2,10 @@
 //! Atomic staging for neutral entity transfer.
 
 use std::borrow::BorrowMut;
-use std::collections::{BTreeMap, HashMap};
-use std::hash::{Hash, Hasher};
+use std::collections::BTreeMap;
+
+type HashMap<K, V> = std::collections::HashMap<K, V, foldhash::fast::RandomState>;
+use std::hash::BuildHasher;
 
 use cadmpeg_core::decode::{DecodeContext, ResourceLimit};
 use cadmpeg_core::CodecError;
@@ -149,9 +151,7 @@ struct IdentitySlot {
 type IdentityIndex = HashMap<u64, Vec<IdentitySlot>>;
 
 fn identity_hash(identity: &str) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    identity.hash(&mut hasher);
-    hasher.finish()
+    foldhash::fast::FixedState::default().hash_one(identity)
 }
 
 fn insert_identity<T>(index: &mut HashMap<u64, Vec<T>>, hash: u64, value: T) {
@@ -159,7 +159,7 @@ fn insert_identity<T>(index: &mut HashMap<u64, Vec<T>>, hash: u64, value: T) {
 }
 
 fn index_model_identities(model: &Model) -> Result<IdentityIndex, &str> {
-    let mut identity_index = IdentityIndex::new();
+    let mut identity_index = IdentityIndex::default();
     macro_rules! index_arenas {
         ($($field:ident: $ty:ty, $doc:literal, [$($attribute:meta),*] $(, [$($schema_attr:meta),*])?;)*) => {
             $(for (slot_index, entity) in model.$field.iter().enumerate() {
@@ -248,7 +248,7 @@ impl Default for ModelDraft {
     fn default() -> Self {
         Self {
             model: Model::default(),
-            insertion_index: Some(IdentityIndex::new()),
+            insertion_index: Some(IdentityIndex::default()),
             accounting: (),
         }
     }
@@ -940,7 +940,7 @@ fn index_committed_identities(
     unknowns: &[crate::unknown::UnknownRecord],
     unknown_namespace: Option<&str>,
 ) -> CommittedIdentityIndex {
-    let mut identities = CommittedIdentityIndex::new();
+    let mut identities = CommittedIdentityIndex::default();
     macro_rules! collect_model_identities {
         ($($field:ident: $ty:ty, $doc:literal, [$($attribute:meta),*] $(, [$($schema_attr:meta),*])?;)*) => {
             $(for (index, entity) in base.model.$field.iter().enumerate() {
@@ -1038,7 +1038,7 @@ fn stage_committed_identities(
     native: Option<&crate::native::Native>,
     unknown_namespace: Option<&str>,
 ) -> CommittedIdentityIndex {
-    let mut staged = CommittedIdentityIndex::new();
+    let mut staged = CommittedIdentityIndex::default();
     macro_rules! stage_model {
         ($($field:ident: $ty:ty, $doc:literal, [$($attribute:meta),*] $(, [$($schema_attr:meta),*])?;)*) => {$(
             for (offset, entity) in model.$field.iter().enumerate() {
@@ -1503,6 +1503,41 @@ mod tests {
 
         drop(session);
         assert_eq!(session_ir, sequential_ir);
+    }
+
+    #[test]
+    fn editing_the_appended_suffix_keeps_the_prefix_index() {
+        let (prefix, suffix) = ("test:model:point#prefix", "test:model:point#suffix");
+        let mut ir = CadIr::empty();
+        let ctx = cadmpeg_test_support::service_decode_context();
+        let mut session = CommitSession::new(&mut ir, &ctx, None).unwrap();
+        session
+            .commit_model(point_draft(prefix))
+            .unwrap()
+            .expect("prefix commit");
+        assert!(session.contains(prefix).unwrap());
+        let checkpoint = ModelCheckpoint::capture(&session.document().model);
+        session
+            .commit_model(point_draft(suffix))
+            .unwrap()
+            .expect("suffix commit");
+
+        // Rolling the suffix back through an edit must forget exactly the suffix.
+        let model = session.edit_appended_model(&checkpoint).unwrap();
+        checkpoint.discard_appended(model).unwrap();
+        assert!(session.contains(prefix).unwrap());
+        assert!(!session.contains(suffix).unwrap());
+        assert_eq!(
+            session.commit_model(point_draft(prefix)).unwrap(),
+            Err(DraftError::IdentityCollision(prefix.into()))
+        );
+        session
+            .commit_model(point_draft(suffix))
+            .unwrap()
+            .expect("the discarded suffix identity is free again");
+        assert!(session.contains(suffix).unwrap());
+        drop(session);
+        assert_eq!(ir.model.points.len(), 2);
     }
 
     #[test]

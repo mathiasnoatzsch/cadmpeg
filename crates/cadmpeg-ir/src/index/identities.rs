@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Scoped lookup of borrowed identity text.
 
-use std::collections::{hash_map::Entry, HashMap};
+use std::collections::hash_map::Entry;
+
+type HashMap<K, V> = std::collections::HashMap<K, V, foldhash::fast::RandomState>;
 
 /// Membership query over a set of identities.
 pub(crate) trait IdentitySet {
@@ -61,7 +63,7 @@ impl<T> Slots<T> {
 impl<'ir, T> BorrowedIdentities<'ir, T> {
     pub(crate) fn new() -> Self {
         Self {
-            slots: HashMap::new(),
+            slots: HashMap::default(),
             len: 0,
         }
     }
