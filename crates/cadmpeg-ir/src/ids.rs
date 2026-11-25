@@ -31,30 +31,43 @@ use std::fmt::{self, Display};
 /// The key is non-empty, contains no `#`, and the whole id has no whitespace.
 #[must_use]
 pub fn is_valid_identity(id: &str) -> bool {
-    let mut separators = 0_u8;
-    let mut key = false;
-    let mut nonempty = false;
-    for character in id.chars() {
+    /// One step of the grammar; `None` refuses the identity.
+    #[inline(always)]
+    fn step(character: char, (separators, key, nonempty): (u8, bool, bool)) -> Option<(u8, bool, bool)> {
         if character.is_whitespace() {
-            return false;
+            return None;
         }
         match character {
-            '#' if key || !nonempty || separators != 2 => return false,
-            '#' => {
-                key = true;
-                nonempty = false;
-            }
+            '#' if key || !nonempty || separators != 2 => None,
+            '#' => Some((separators, true, false)),
             ':' if !key => {
                 if !nonempty || separators == 2 {
-                    return false;
+                    None
+                } else {
+                    Some((separators + 1, key, false))
                 }
-                separators += 1;
-                nonempty = false;
             }
-            _ => nonempty = true,
+            _ => Some((separators, key, true)),
         }
     }
-    key && nonempty
+    let mut state = (0_u8, false, false);
+    // Identities are almost always ASCII; scan bytes without decoding UTF-8.
+    if id.is_ascii() {
+        for byte in id.bytes() {
+            state = match step(char::from(byte), state) {
+                Some(next) => next,
+                None => return false,
+            };
+        }
+    } else {
+        for character in id.chars() {
+            state = match step(character, state) {
+                Some(next) => next,
+                None => return false,
+            };
+        }
+    }
+    state.1 && state.2
 }
 
 /// An entity identity with validated namespace and key grammar.
