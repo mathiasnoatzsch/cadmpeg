@@ -2324,6 +2324,20 @@ impl<'a> DecodeContext<'a> {
             let id = curve.id.as_str().to_string();
             derived_ids.push(id);
         }
+        let procedural_owners: Vec<(cadmpeg_ir::ids::SurfaceId, String)> = model.surfaces
+            [before.arena_len::<Surface>()..]
+            .iter()
+            .filter_map(|surface| {
+                Some((
+                    surface.id.clone(),
+                    surface
+                        .geometry
+                        .procedural_construction()?
+                        .as_str()
+                        .to_owned(),
+                ))
+            })
+            .collect();
         for surface in before
             .added_mut::<Surface>(model)
             .ok_or_else(|| "instance decode removed existing surfaces".to_string())?
@@ -2426,6 +2440,26 @@ impl<'a> DecodeContext<'a> {
         if model.procedural_curves.len() > procedural_curve_start
             || model.procedural_surfaces.len() > procedural_surface_start
         {
+            // A rigid placement keeps revolution and sum surfaces what they are: move their
+            // axis or base point and re-attach them. Other constructions are not re-derived;
+            // their exact solved carrier is retained instead.
+            let kept = if transform.is_proper_rigid() {
+                let mut kept = Vec::new();
+                for procedure in &model.procedural_surfaces[procedural_surface_start..] {
+                    let Some((owner, _)) = procedural_owners
+                        .iter()
+                        .find(|(_, id)| id == procedure.id.as_str())
+                    else {
+                        continue;
+                    };
+                    if let Some(moved) = place_procedural_surface(procedure, transform) {
+                        kept.push((owner.clone(), moved));
+                    }
+                }
+                kept
+            } else {
+                Vec::new()
+            };
             let mut annotations = AnnotationBuilder::resume(std::mem::take(&mut self.annotations));
             let mut omitted = std::collections::HashSet::new();
             for procedure in &model.procedural_curves[procedural_curve_start..] {
@@ -2433,14 +2467,25 @@ impl<'a> DecodeContext<'a> {
                 omitted.insert(procedure.id.as_str().to_owned());
             }
             for procedure in &model.procedural_surfaces[procedural_surface_start..] {
-                annotations.remove_entity(procedure.id.as_str());
-                omitted.insert(procedure.id.as_str().to_owned());
+                if !kept.iter().any(|(_, moved)| moved.id == procedure.id) {
+                    annotations.remove_entity(procedure.id.as_str());
+                    omitted.insert(procedure.id.as_str().to_owned());
+                }
             }
             self.annotations = annotations.build();
             model.procedural_curves.truncate(procedural_curve_start);
             model.procedural_surfaces.truncate(procedural_surface_start);
-            self.report.phase_warnings.push(format_args!("instance: transformed procedural definition omitted; exact solved carrier retained"));
-            self.drop_expansion_links(&omitted)?;
+            let mut admission = cadmpeg_ir::document::procedural::ProceduralAdmission::new(model);
+            for (owner, moved) in kept {
+                let id = moved.id.as_str().to_owned();
+                if admission.add_surface(model, &owner, moved)?.is_err() {
+                    omitted.insert(id);
+                }
+            }
+            if !omitted.is_empty() {
+                self.report.phase_warnings.push(format_args!("instance: transformed procedural definition omitted; exact solved carrier retained"));
+                self.drop_expansion_links(&omitted)?;
+            }
         }
         for id in derived_ids {
             annotate_derived(&mut self.annotations, &id);
@@ -6220,6 +6265,43 @@ fn transform_curve(
         }
     };
     Ok(())
+}
+
+/// Moves a revolution or sum surface by a proper rigid transform: the directrix and base
+/// curves are copies the instance already moved, so only the axis or base point is left.
+fn place_procedural_surface(
+    procedure: &ProceduralSurface,
+    transform: Transform,
+) -> Option<ProceduralSurface> {
+    use cadmpeg_ir::geometry::ProceduralSurfaceDefinition as Definition;
+    let mut definition = procedure.definition().clone();
+    match &mut definition {
+        Definition::Revolution(revolution) => {
+            revolution.set_axis_origin(transform.apply_point(revolution.axis_origin().get())?);
+            revolution
+                .set_axis_direction(transform.apply_unit_normal(revolution.axis_direction())?);
+        }
+        Definition::AxisRevolution(revolution) => {
+            revolution.set_axis_origin(transform.apply_point(revolution.axis_origin().get())?);
+            revolution
+                .set_axis_direction(transform.apply_unit_normal(revolution.axis_direction())?);
+        }
+        Definition::Sum(sum) => {
+            let base = sum.basepoint().get();
+            let moved = transform
+                .apply_point(Point3::new(base.x, base.y, base.z))?
+                .get();
+            sum.set_basepoint(cadmpeg_ir::features::FiniteVector3::new(
+                cadmpeg_ir::math::Vector3::new(moved.x, moved.y, moved.z),
+            )?);
+        }
+        _ => return None,
+    }
+    Some(ProceduralSurface::new(
+        procedure.id.clone(),
+        definition,
+        procedure.record_bounds(),
+    ))
 }
 
 fn transform_surface(surface: &mut Surface, transform: Transform) -> Result<(), ReferenceFailure> {
