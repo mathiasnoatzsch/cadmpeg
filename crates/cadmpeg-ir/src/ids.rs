@@ -32,8 +32,11 @@ use std::fmt::{self, Display};
 #[must_use]
 pub fn is_valid_identity(id: &str) -> bool {
     /// One step of the grammar; `None` refuses the identity.
-    #[inline(always)]
-    fn step(character: char, (separators, key, nonempty): (u8, bool, bool)) -> Option<(u8, bool, bool)> {
+    #[inline]
+    fn step(
+        character: char,
+        (separators, key, nonempty): (u8, bool, bool),
+    ) -> Option<(u8, bool, bool)> {
         if character.is_whitespace() {
             return None;
         }
