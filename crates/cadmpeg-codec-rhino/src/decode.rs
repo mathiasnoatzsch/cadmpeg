@@ -2065,6 +2065,40 @@ impl<'a> DecodeContext<'a> {
         Ok(false)
     }
 
+    /// Removes the links this expansion added to source records that point at entities the
+    /// expansion omitted again. A link to an omitted entity cannot resolve, and the dangling
+    /// link made IR admission reject the whole instance.
+    fn drop_expansion_links(
+        &mut self,
+        omitted: &std::collections::HashSet<String>,
+    ) -> Result<(), cadmpeg_core::CodecError> {
+        let Some(undo) = &mut self.expansion_undo else {
+            return Ok(());
+        };
+        let mut dropped = Vec::new();
+        undo.links.retain(|(record, link)| {
+            let omit = omitted.contains(link);
+            if omit {
+                dropped.push((*record, link.clone()));
+            }
+            !omit
+        });
+        dropped.sort_unstable();
+        for group in dropped.chunk_by(|left, right| left.0 == right.0) {
+            let Some((record, _)) = group.first() else {
+                continue;
+            };
+            if let Some((_, target)) = self.session.unknown_links_mut(*record)? {
+                target.retain(|link| {
+                    group
+                        .binary_search_by(|(_, omitted)| omitted.as_str().cmp(link))
+                        .is_err()
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// Removes the links and outcomes a rejected expansion added. Links were
     /// only inserted, each once, into sorted lists, so removing them restores
     /// every touched record exactly.
@@ -2393,16 +2427,20 @@ impl<'a> DecodeContext<'a> {
             || model.procedural_surfaces.len() > procedural_surface_start
         {
             let mut annotations = AnnotationBuilder::resume(std::mem::take(&mut self.annotations));
+            let mut omitted = std::collections::HashSet::new();
             for procedure in &model.procedural_curves[procedural_curve_start..] {
                 annotations.remove_entity(procedure.id.as_str());
+                omitted.insert(procedure.id.as_str().to_owned());
             }
             for procedure in &model.procedural_surfaces[procedural_surface_start..] {
                 annotations.remove_entity(procedure.id.as_str());
+                omitted.insert(procedure.id.as_str().to_owned());
             }
             self.annotations = annotations.build();
             model.procedural_curves.truncate(procedural_curve_start);
             model.procedural_surfaces.truncate(procedural_surface_start);
             self.report.phase_warnings.push(format_args!("instance: transformed procedural definition omitted; exact solved carrier retained"));
+            self.drop_expansion_links(&omitted)?;
         }
         for id in derived_ids {
             annotate_derived(&mut self.annotations, &id);
